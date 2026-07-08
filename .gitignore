@@ -1,0 +1,16 @@
+# 本地真实配置（含账号密码）—— 切勿提交
+scripts/config.local.js
+
+# 运行产物
+*.xlsx
+*.xlsx.part
+~$*
+Downloads/
+
+# 系统 / 依赖
+node_modules/
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
