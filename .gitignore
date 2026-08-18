@@ -1,11 +1,16 @@
 # 本地真实配置（含账号密码）—— 切勿提交
 scripts/config.local.js
+.env
+.env.local
 
 # 运行产物
 *.xlsx
 *.xlsx.part
 ~$*
 Downloads/
+
+# 打包产物
+*.zip
 
 # 系统 / 依赖
 node_modules/

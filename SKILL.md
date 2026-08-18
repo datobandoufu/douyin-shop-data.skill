@@ -1,229 +1,143 @@
 ---
-name: douyin-shop-data
-description: >-
-  抖店电商罗盘自动化数据下载。支持自动登录抖店、导航至电商罗盘商品列表 / 达人列表 / 交易明细（成交分析）、
-  设置日期筛选（近1天/近7天/近30天等）、下载各类明细 Excel、
-  并通过「商品构成」sheet 的商品名称做品牌内容校验（防止多店铺数据串味错标）、将文件整理到项目目录中。
-  下载完成后自动聚合生成「日期_品牌_日报.xlsx」（4 个 sheet：成交概览/自营成交/商品列表/达人列表）。
-  适用于每日定时拉取抖店商品经营数据并产出日报。
-  触发词：抖店、电商罗盘、商品列表、达人列表、交易明细、成交分析、下载明细、抖店数据、日报、进入抖店、进入电商罗盘、打开抖店、打开电商罗盘。
-agent_created: true
+name: douyin-daily-report
+description: "抖店（抖音电商）后台自动化日报流水线。驱动 Chrome CDP 登录抖店卖家后台（fxg.jinritemai.com），对双店铺依次导出商品/佣金/电商罗盘数据，切店后重复，最后合并为多 sheet Excel 日报。适用于：跑批、补跑单店、排障、迁移到新机器、双店铺流水线复刻。触发词：抖店日常报表、精选联盟佣金抓取、电商罗盘导出、双店铺流水线、douyin daily report、step5、step6、step7、step9。"
+disable-model-invocation: true
 ---
 
-# 抖店电商罗盘数据下载
+# 抖店双店铺日常报表自动化
 
-本 skill 自动化从抖店后台 → 电商罗盘 → 商品列表 + 达人列表 + 交易明细（成交分析）的数据拉取流程。
+## 项目概览
 
-## 何时使用
+端到端浏览器自动化流水线：通过 Chrome DevTools Protocol (CDP) 驱动抖店卖家后台，采集**两个店铺**的每日经营数据，合并为统一的多 sheet Excel 日报。
 
-- 用户要求从抖店下载商品数据和达人数据
-- 用户要求从电商罗盘「交易」标签下载交易明细（成交分析）
-- 用户需要获取抖店商品经营数据、合作达人数据、店铺成交分析数据并产出日报
-- 指定日期范围的商品明细 + 达人明细 + 交易明细下载
-- 需要防止多店铺数据串味（交易明细文件名不含品牌，需靠商品名做内容校验归属）
-
-## 核心能力
-
-1. **浏览器连接** — 通过脚本启动/检测 Chrome + CDP WebSocket 直连
-2. **登录抖店** — 自动填充邮箱登录表单（需手动滑块验证）
-3. **导航与筛选** — 直接 URL 导航至商品列表、达人列表、交易（成交分析）页面，设置时间范围
-4. **下载与整理** — 触发下载明细，交易明细采用快照法 + 品牌内容校验归档到项目日期文件夹
-5. **日报聚合** — 三表下载完成后调用 `generate-daily-report.py` 生成「日期_品牌_日报.xlsx」（4 个 sheet）
-
-## CDP 实现规则（关键）
-
-> **所有 CDP 多步骤流程必须使用 async/await CDPClient 封装（见 `references/cdp-patterns.md`），
-> 禁止使用 `ws.on('message')` 回调式事件监听状态机。**
->
-> 原因：回调模式在多层 WebSocket + 多步骤场景下极容易漏事件、状态混乱、难以调试。
-> CDPClient 将 `send()` 转为 Promise、`waitFor()` 阻塞等待事件、`eval()` 直接返回 JS 执行结果，
-> 使脚本顺序执行，逻辑清晰。
-
-### 每次执行的脚本结构
-
-```js
-import WebSocket from 'ws';
-
-// 1. 粘贴 CDPClient 类（从 cdp-patterns.md）
-class CDPClient { /* ... */ }
-
-// 2. main() 串联所有步骤
-async function main() {
-  const browser = new CDPClient(BROWSER_WS); await browser.connect();
-  // ... 创建 page target → 等待加载 → 操作 → 下载 ...
-}
-main().catch(e => { console.error(e); process.exit(1); });
+```
+店铺A 商品导出 ─┐
+店铺A 佣金采集 ─┤  step9 合并
+店铺A 罗盘导出 ─┼──►  5-sheet 日报
+店铺B 商品导出 ─┤
+店铺B 佣金采集 ─┤
+店铺B 罗盘导出 ─┘
 ```
 
-### 导航策略
+本技能自带 `scripts/` 生产脚本（已脱敏，店铺名/路径全部可配置），`references/` 存放实战中沉淀的非显然 CDP 模式、顶栏 DOM 结构与完整踩坑记录。
 
-- **优先直接 URL 导航**（`Target.createTarget` + 完整 URL），cookies 通过 `--user-data-dir` 共享
-- 备选：从首页点击导航按钮（多一步 tab 切换，更易出错）
-- 页面加载后至少等待 3 秒（SPA hydration 需时间）
-- **仅打开页面（不下载）**：若用户只要求「打开/进入抖店」或「打开/进入电商罗盘」，直接跑 `scripts/navigate-shop.mjs` / `scripts/navigate-compass.mjs`（经 CDP 新建标签页并读取 URL/title 确认进入，不触发任何下载）
+## 适用场景
 
-## 可复用资源
+- 构建 / 运行 / 排障 / 定时调度抖店日报流水线
+- 修复某一步失败（如 `NO_BUYIN_TAB`、`NOT_FOUND: 导出查询商品`、店铺切换失败）
+- 把流水线迁移到新机器 / 新店铺组合
+- 回答"抖店自动化怎么跑的 / 弱点在哪"
 
-| 文件 | 类型 | 用途 |
-|------|------|------|
-| `scripts/start-chrome.ps1` | PowerShell | 杀旧 Chrome 进程，以调试模式重启（max 30s 含重试） |
-| `scripts/navigate-shop.mjs` | Node.js | 辅助：经 CDP 新建标签页打开抖店后台（`https://fxg.jinritemai.com/`），读取 URL/title 确认已进入（用于「打开/进入抖店」类需求） |
-| `scripts/navigate-compass.mjs` | Node.js | 辅助：经 CDP 新建标签页打开电商罗盘（`https://compass.jinritemai.com/shop`），读取 URL/title 确认登录态有效（用于「打开/进入电商罗盘」类需求） |
-| `scripts/download-all.mjs` | Node.js | **多品牌编排脚本**，登录一次 → 按序下载所有品牌数据（商品列表→达人列表→交易明细） |
-| `scripts/product-download.mjs` | Node.js | 商品列表下载 → 归档（--brand / --date 参数化） |
-| `scripts/influencer-download.mjs` | Node.js | 达人列表下载 + CDP Network 拦截写入（fiber 多深度 fallback） |
-| `scripts/transaction-download.mjs` | Node.js | 交易明细（成交分析）下载：内置 switchStore 切店铺 → 快照法归档 → 品牌内容校验 |
-| `scripts/generate-daily-report.py` | Python | **日报生成**：聚合三表 → 输出「日期_品牌_日报.xlsx」（4 sheet：成交概览/自营成交/商品列表/达人列表） |
-| `scripts/extract-products.py` | Python | 从交易明细 xlsx 提取「商品构成」sheet 的商品名称（供品牌校验，依赖 venv openpyxl） |
-| `scripts/archive.sh` | Bash | 将下载文件移入 `YYYYMMDD/` 并按规则重命名（商品列表/达人列表用；交易明细已改为内置快照归档，不再走此脚本） |
-| `references/cdp-helpers.js` | JS 片段 | `Runtime.evaluate` 注入用的可复用函数 |
-| `references/react-fiber-patterns.md` | 参考 | React 组件操作模式详解 |
-| `references/cdp-patterns.md` | 参考 | async/await CDPClient 封装类 + 网络拦截示例 |
-| `references/workflow.md` | 参考 | 完整 10 步工作流 |
+## 前置条件
 
-## 执行流程
+1. Chrome 以 `--remote-debugging-port=9222 --user-data-dir=<目录>` 启动，且已登录抖店卖家后台（登录态随调试资料目录持久化）。
+   - 新版 Chrome **禁止在默认资料目录开远程调试**，必须用非默认 `--user-data-dir`。
+   - 频繁登录可能触发 geetest 滑块，需人工一次性拖拽；之后会话长期有效。
+2. **Node ≥ 22**（内置 WebSocket，CDP 连接用 EventTarget API）。旧版 Node 需自装 `ws` 并经 `DD_WS_PATH` 指定。
+3. step5 / step9 需要 Python 环境，含 `pandas` + `openpyxl`。
+4. 登录凭据通过环境变量运行时注入，**绝不落盘**（见下）。
 
-### 快速开始（一键脚本）
+## 环境与路径配置（新机器必读）
 
+所有脚本的机器相关常量均支持环境变量覆盖，公开仓库不含任何本机绝对路径：
+
+| 环境变量 | 作用 | 默认值 |
+|---|---|---|
+| `DD_SHOP_A` / `DD_SHOP_B` | 两个店铺名（**必填**；店铺名前 3 字符需能互相区分，用于顶栏品牌匹配） | `店铺A` / `店铺B` |
+| `DD_NODE` | Node 可执行文件 | `node` |
+| `DD_PYTHON` | Python 可执行文件（step5/step9 用） | `python` |
+| `DD_PYTHONPATH` | pandas/openpyxl 所在路径（隔离环境时用） | 空（用系统环境） |
+| `DD_CHROME` | Chrome 可执行文件 | `C:/Program Files/Google/Chrome/Application/chrome.exe` |
+| `DD_CHROME_USER_DATA` | Chrome 调试用户数据目录（登录态在此） | `C:/tmp/chrome-debug` |
+| `DD_TMP_DIR` / `DD_DL_DIR` | 临时目录 / 下载暂存目录 | `C:/tmp` / `C:/tmp/doudian-dl` |
+| `DD_WS_PATH` | 旧版 Node 的 `ws` 模块路径（Node ≥ 22 无需设置） | 无 |
+| `DOUDIAN_EMAIL` / `DOUDIAN_PASSWORD` | 登录凭据（运行时注入，写入 `.env` 且 `.env` 不入版本库） | 无 |
+| `DOUDIAN_BRAND` | 单步运行时指定当前店铺（run-all 自动按店铺设置） | `DD_SHOP_A` |
+
+Windows 定时入口 `daily-run.bat` 会读取同目录 `.env` 注入上述变量；Linux/macOS 可用 `export` 或 `.env` + dotenv 等价方式。
+
+## 流水线（11 步，`scripts/run-all.cjs` 编排）
+
+```
+1.  open-chrome-doudian.*      启动/复用 Chrome + 进入后台，清理非 fxg 标签
+2+3. doudian-login-and-enter   登录 + 选店状态机（backend/shopselect/login/unknown）
+4.  step4-export.cjs   [店铺A] 商品管理导出
+5.  step5-yujing.cjs   [店铺A] 精选联盟佣金：canvas 扫蓝线 + hover tooltip → 7 天佣金
+6.  step6-compass.cjs  [店铺A] 电商罗盘：商品/达人/交易三明细导出
+7.  step7-switch-shop.cjs      切换店铺（hover 品牌 → 切换组织/店铺 → 选目标 → reload）
+8.  step4-export.cjs   [店铺B] 商品管理导出
+9.  step5-yujing.cjs   [店铺B] 精选联盟佣金
+10. step6-compass.cjs  [店铺B] 电商罗盘导出
+11. step9-build-report.cjs     合并双店铺 5-sheet 日报
+```
+
+- 步骤 4–6 / 8–10 是同一组脚本以不同 `DOUDIAN_BRAND` 调用。
+- **step7 是 `critical:true`**：切换失败即硬停，防止店铺间数据污染（P0 风控，见 references/known-pitfalls.md）。
+- 断点续跑：`state/YYYY-MM-DD.json` 记录当天已完成步骤，崩溃/重跑自动跳过；同日二次触发幂等（缺项但产物已存在则补记检查点，再跑全跳过、零采集）。
+
+## 运行方式
+
+全流程（凭据从环境变量来；会话有效可跳过登录）：
 ```bash
-# 多账号一键下载（推荐，含交易明细）
-node scripts/download-all.mjs [--date YYYYMMDD] [--brands 品牌1,品牌2]
-
-# 单账号手动
-PowerShell scripts/start-chrome.ps1
-BROWSER_WS=$(curl -s http://localhost:9222/json/version | grep -o '"webSocketDebuggerUrl": "[^"]*"' | cut -d'"' -f4)
-node scripts/product-download.mjs "$BROWSER_WS" --brand <品牌简称>
-node scripts/influencer-download.mjs "$BROWSER_WS" --brand <品牌简称>
-node scripts/transaction-download.mjs "$BROWSER_WS" --brand <品牌简称>
+DOUDIAN_EMAIL=xxx DOUDIAN_PASSWORD=xxx DD_SHOP_A='店铺A名' DD_SHOP_B='店铺B名' node scripts/run-all.cjs
+node scripts/run-all.cjs --skip=login        # 会话已有效
+node scripts/run-all.cjs --skip=second       # 只跑店铺A
+node scripts/run-all.cjs --skip=step5        # 跳过单步
+node scripts/run-all.cjs --fresh             # 清空当天检查点强制重采（慎用，可能触发滑块）
 ```
 
-`download-all.mjs` 内部编排：
-1. 启动 Chrome → 登录一次（填写账号邮箱，见 `scripts/config.js` 的 `ACCOUNTS`）
-2. **探测当前店铺视角**（`.userName-zP35aZ`），与 `--brands` 第一个品牌对比
-3. 按品牌列表顺序：先切换数据视角（如需）→ 下载商品 + 达人 + 交易明细 → **生成日报**（三表齐全才生成）→ 汇总报告（汇总含四类 OK/FAIL：商品/达人/交易明细/日报）
+**重要：必须前台执行，超时给足（600s）**；后台模式可能被环境强杀。
 
-**品牌切换流程**（`download-all.mjs` 内置）：<br>
-`getCurrentStore()` 探测当前店铺 → 若与目标不一致则执行切换：<br>
-Hover `.userDropDown-k9_W5P` → fiber D0 点击 `.switchAccount-jAhEuJ` → 弹窗中选择 `index_roleItem__3R8yT`（fiber D0）→ 页面跳转 compass 首页 → `product-download.mjs` + `influencer-download.mjs`
+### 补跑单店（重要！）
 
-| 品牌简称 | 弹窗中店铺全名 |
-|---------|-------------|
-| `<品牌A简称>` | `<品牌A店铺全名>` |
-| `<品牌B简称>` | `<品牌B店铺全名>` |
+**补跑单店不要走 run-all**（登录步会把店铺切回店铺A → 店铺B 的 ensureBrand 必败）。正确姿势：
+1. `node scripts/step7-switch-shop.cjs`（切到目标店铺）
+2. `DOUDIAN_BRAND=<目标店> node scripts/step5-yujing.cjs`（或 step6）
+3. `node scripts/step9-build-report.cjs`
 
-> 品牌简称与店铺全名映射在 `scripts/config.js` 的 `BRAND_FULL_NAMES` 中配置。
+例外：`.env` 未设 `DOUDIAN_BRAND` 时默认店铺A且会自动切回，可直接跑。
 
-脚本参数：
-- `--date YYYYMMDD`：指定日期，默认昨天
-- `--brands 品牌A,品牌B`：指定品牌列表，默认读取 `config.js` 的 `BRANDS`
-- `--brand`（子脚本）：单品牌名，默认读取 `config.js` 的第一个品牌
+### 产物
 
-### 连接浏览器
+按数据日期建目录 `YYYY-MM-DD/`，每店铺 5 个文件：
+`{date}_{brand}_商品管理导出.xlsx` / `_日常报表.xlsx`（佣金）/ `_商品列表.xlsx` / `_达人列表.xlsx` / `_交易明细.xlsx`。
+step9 把每家 `日常报表.xlsx` 重写为 5-sheet 合并格式：
+Sheet1 佣金 / Sheet2 成交概览 / Sheet3 自营成交 / Sheet4 商品列表 / Sheet5 达人列表（丢成交商品=0）。
 
-优先使用脚本：`PowerShell scripts/start-chrome.ps1`。脚本会杀旧进程、以 `--remote-debugging-port=9222 --no-sandbox` 重启 Chrome、等待端口就绪（最多 30 秒，含重试）。
+## 各步骤内部要点（快速参考）
 
-获取 browser WebSocket URL：
-```bash
-curl -s http://localhost:9222/json/version | grep -o '"webSocketDebuggerUrl": "[^"]*"' | cut -d'"' -f4
-```
+- **step4-export**：真实点击侧边栏「商品管理」→「导出查询商品」→「导出」→ 关新标签 →「查看导出记录」→ 匹配最近记录（严格 `> exportStartTime-90s`）→ `Network.responseReceived` 拦截 `downloadTaskResult` + Node HTTP 带 Cookie 直下 → 归档（日期 = 记录完成时间 - 1 天）。重复点击防护：最多 2 次点击。
+- **step5-yujing**：精选联盟 → buyin 新标签 → 看数据 → 只勾「预估佣金支出」（刷新后 checkbox 重置，需三级点击重勾）→ **自适应 canvas x 范围扫描蓝线 (25,102,255)** → CDP hover 7 采样点 → before/after DOM 对比捕获 tooltip → 正则解析 → Excel。**退出码 0 不代表数据齐，必须核对 7 天窗口含 T-1**。
+- **step6-compass**：电商罗盘 → compass 新标签；商品/交易 hover「下载明细」→「下载当前明细」，达人**直接点**「下载明细」（下拉被引导提示拦截）。数据日期 = 运行时前一天。`waitForDownload` 双重归属校验防串档。**B1 防污染**：开 compass 后校验顶栏店铺名 == BRAND，不符即退出；最多 3 次"关 compass→回 fxg 暖机→重开再校验"。
+- **step7-switch-shop**：读当前品牌 → hover 品牌名 → 点「切换组织/店铺」→ 弹窗选目标店（带图标子元素，勿限 children）→ `Page.reload()` + 侧边栏就绪轮询 → 切完把鼠标移开顶栏防浮层残留。
+- **step9-build-report**：Python/pandas；长数字列（≥12 位纯数字 + 关键词列）强制文本 `@` 防 19 位商品编码精度丢失；源文件缺失填空 DataFrame；日期 fallback 昨天→前天；`open(...,'rb')` 显式关句柄 + `gc.collect()` 防 WinError 5 文件占用。
 
-所有 CDP 操作用 Node.js 原生 WebSocket + async/await CDPClient 封装（见 `references/cdp-patterns.md`）。每次执行写在独立 `.mjs` 脚本中，脚本顶部粘贴 CDPClient 类。
+## 硬规则（实战铁律）
 
-### 操作 React 受控组件
+1. **店铺名匹配用前 3 字符**（顶栏品牌 + 店铺列表），两个店铺名前 3 字符必须不同。
+2. **step7 是硬阻断点**，绝不允许静默失败继续采集（否则数据归档错店）。
+3. **compass 防污染（B1）**：开 compass 必校验店铺名；「切换数据视角」仅 B1 失败兜底，绝不跨店乱切。
+4. React 受控组件（登录表单/checkbox/顶栏 tab）一律 **CDP 真实鼠标点击或原生 value setter**，`el.click()` 无效。
+5. 点顶部导航前先解除搜索框焦点（点空白区），否则顶栏标签被浮层遮挡。
+6. 凭据只走环境变量；`.env` 只存键名与占位，**不提交版本库**。
+7. step5 完成后必须核对数据窗口含 T-1，别信退出码。
+8. 迁移新机器：先按「环境与路径配置」表核对全部变量，再跑单步冒烟（step4 最安全），最后全流程。
 
-抖店后台是 React SPA（@ecomelement/ui），常规 DOM 操作对受控组件无效。不同组件需要不同策略，详见 `references/react-fiber-patterns.md`：
+## 资源
 
-- **ecom-radio-group**（时间筛选）→ dispatchEvent + MouseEvent 链
-- **商品列表下载按钮**（打开下拉）→ fiber onPopupVisibleChange（D5 主，D4/D6 fallback）
-- **dropdown 菜单项**（点击下载当前明细）→ React fiber onClick（逐层遍历找 handler）
-- **达人直接下载按钮**（`.withTooltip-lLfGGo`）→ fiber onDownload（D8 主，D6/D7/D9 fallback）+ CDP Network 拦截响应体
+### scripts/（生产脚本，run-all 编排；单步可独立调用）
+`run-all.cjs`（11 步主控 + 断点续跑 + 容错）、`open-chrome-doudian.sh/.mjs`、`doudian-login-and-enter.mjs`（登录状态机）、`step4/5/6/7/9-*.cjs`、`brand-helper.cjs`（品牌校验/切换，被 step4~7 复用）、`fail-capture.cjs`（fatal 截图 + diag）、`daily-run.bat`（Windows 定时入口）。
 
-### 时间范围选择
+### lib/（内置依赖，随技能分发）
+`xlsx_pack.py` + `minimal_xlsx/` 模板（MIT）——step5 用最小 OOXML 模板 + zip 打包生成 xlsx，不依赖外部私有技能。
 
-日期基于代码运行当天的昨天。筛选组件 radio value 映射：
+### references/（按需阅读）
+- `cdp-patterns.md` — CDP 连接拓扑、稳健封装、React 输入填充、死锁规避、Node 约束
+- `topnav-dom.md` — 顶栏精确 DOM；**搜索框焦点会偷走顶栏标签**（先解除焦点再点导航）
+- `known-pitfalls.md` — 完整踩坑 + 修复记录（含 8 月新坑：compass B1 防污染、长数字精度、WinError 5、step4 防重复点击）
 
-| value | 含义 |
-|-------|------|
-| `one` | 近1天（昨天） |
-| `seven` | 近7天 |
-| `thirty` | 近30天 |
+## 已知限制
 
-### 下载与归档
-
-**执行顺序：先商品列表，后达人列表，最后交易明细。优先使用稳定脚本：**
-- `node scripts/product-download.mjs <WS_URL>` — 商品列表全流程（导航 → 筛选 → 下载 → 归档）
-- `node scripts/influencer-download.mjs <WS_URL>` — 达人列表全流程（导航 → 合作达人 tab → 筛选 → CDP 拦截下载）
-- `node scripts/transaction-download.mjs <WS_URL>` — 交易明细全流程（切店铺视角 → 选近1天 → 下载当前明细 → 快照法归档 → 品牌校验）
-
-**商品列表下载**（备选手动流程）：
-- `Target.createTarget(url: compass...product-list)` → 等待 load → 时间筛选 → fiber D5 下拉 + fiber onClick
-- 文件命名模式：`经营版_商品_商品列表__YYYYMMDD-YYYYMMDD_数据更新时间YYYYMMDD.xlsx`
-- 归档命令：`bash scripts/archive.sh 商品列表 [YYYYMMDD]`
-
-**达人列表下载**（备选手动流程）：
-- `Target.createTarget(url: compass...talent-core-analysis)` → 等待 load → 点击合作达人 tab
-- `Network.enable` → fiber onDownload（D8 主，D6/D7/D9 fallback）→ `Network.loadingFinished` + `Network.getResponseBody` → base64 解码写入
-- 达人下载按钮为直接按钮（无下拉菜单）
-- 直接写入项目目录 `${PROJECT_DIR}/${DATE}/`，无需额外归档
-
-**交易明细下载**（成交分析，备用手动流程也可由 transaction-download.mjs 一站式完成）：
-- 顶部导航「交易」(`aurora-dropdown-trigger menuName-iiOPo5`) → 默认子页「全店成交分析」(`/shop/business-part`)
-- 日期选「近1天」(`input[type=radio][value=one]`)，罗盘中等同"昨天"，与日报约定一致
-- 导出入口：「下载明细」(`ecom-dropdown-trigger`，文字含"下载明细") → 菜单项「下载当前明细」(fiber onClick)
-- 下载文件名：`抖音电商罗盘-成交分析-YYYYMMDD-YYYYMMDD.xlsx`（`文件名不含品牌`，按当前店铺视角导出）
-- 接口：`compass_api/download_center/shop/download_file_sync`，scene=`compass_shop_transaction_analysis_download`
-- 导出含 12 个 sheet：成交概览/自营成交/合作成交/收支概况/载体构成/账号构成/单载体构成/终端构成/品类构成/商品构成/价格带构成/人群构成
-
-### ⚠️ 交易明细两大坑（已修复，transaction-download.mjs 已内置）
-1. **文件名不含品牌** → 下载前必须切对店铺视角，否则下到 A 店数据却标成 B 店。`transaction-download.mjs` 已内置 `switchStore`（Hover 店铺名 → 切换数据视角 → 选品牌），独立运行也能切对。
-2. **archive.sh 的 `ls -t | head -1` 会误匹配旧文件** → 同一天 Downloads 里若有别的品牌/上次运行的交易分析文件，会取到旧文件导致错标。`transaction-download.mjs` 已改为**快照法**（点击下载前记录 Downloads 已有文件，**只认点击后新出现的文件**）并自带 `fs.copyFileSync` 归档，**不再调用 archive.sh**。商品列表/达人列表文件名含品牌与时间戳，仍走 archive.sh 不受影响。
-
-### 🛡️ 品牌内容校验（关键，用户提供的判定方法）
-- 交易明细文件名不含品牌，仅靠"切对视角"不够稳。判定思路：交易明细的「商品构成」sheet 内含商品交易数据，可用商品名判断表格所属品牌。
-- `transaction-download.mjs` 归档前调用 `extract-products.py`（openpyxl 读 xlsx，venv 路径由 `PYTHON` 环境变量指定，详见 `scripts/config.js`）提取商品名，再做**品牌排斥匹配**——出现非目标品牌特征词即判定串味、`process.exit(1)` 拒绝归档（保留 Downloads 原文件待人工核查）；命中目标品牌词则通过。
-- `BRAND_KEYWORDS`（示例）：`品牌A→['品牌A特征词']`、`品牌B→['品牌B特征词1','品牌B特征词2']`。各品牌特征词在 `scripts/config.js` 的 `BRAND_KEYWORDS` 中配置，用真实商品名校准，保证互不交叉 → 双向排斥匹配成立。
-- ⚠️ `extract-products.py` **绝不能用 `read_only=True`** —— 罗盘导出的 xlsx 在该模式下读不到任何数据，会误判成「空模板」。必须用普通 `load_workbook(fp, data_only=True)`。
-- ⚠️ 归档 EBUSY（Excel 锁）：归档目标 xlsx 被 Excel 打开时（项目目录 `~$` 锁文件），`safeArchive` 先复制为 `.part` 再 `rename`，源/目标任一被锁都自动重试（≤60 次），等 Excel 关闭后自动完成。
-
-### 📊 日报生成（三表下载后自动聚合）
-
-下载完某品牌 商品列表 + 达人列表 + 交易明细 后，`download-all.mjs` 自动调用 `generate-daily-report.py` 生成 **`日期_品牌_日报.xlsx`**，含 4 个 sheet：
-
-| Sheet 名 | 数据源 | 过滤规则 |
-|----------|--------|----------|
-| `交易明细-成交概览` | 交易明细「成交概览」sheet | 载体类型 = **全部** 且 投放时段 = **不限** |
-| `交易明细-自营成交` | 交易明细「自营成交」sheet | 仅 投放时段 = **不限**（不限载体类型，保留全部/直播/短视频/商品卡/图文/其他各行） |
-| `商品列表` | 商品列表（全部 sheet） | 全量数据 |
-| `达人列表` | 达人列表（抖音直播 sheet） | 成交商品 **≠ 0**（剔除非成交达人） |
-
-- 过滤按表头名精确匹配列：`载体类型` / `投放时段` / `成交商品`，稳健不依赖列顺序。
-- 仅保留表头 + 命中行，保留源表全部列。
-- 三表任一缺失则跳过该品牌日报（汇总标记 FAIL）。
-- 独立运行：`python generate-daily-report.py --date YYYYMMDD --brand 品牌简称`（依赖 venv openpyxl）。
-
-**下载确认**：
-- 触发下载后等待 5-8 秒
-- 商品列表：检查 `$HOME/Downloads/` 目录确认文件完成
-- 达人列表：CDP 拦截写入，无需检查 Downloads
-- **不要短时间内重复触发下载**，每次运行前先检查是否已有当天文件
-
-## 配置（账号与品牌）
-
-本 skill 不内置任何账号密码。所有隐私配置集中在 `scripts/config.js`，可通过环境变量覆盖：
-
-- `ACCOUNTS`：账号邮箱列表（登录时逐个尝试）
-- `PASSWORD` 或环境变量 `DOUYIN_PASSWORD`：登录密码
-- `BRANDS`：本次要下载的品牌简称列表
-- `BRAND_FULL_NAMES`：品牌简称 → 弹窗中店铺全名 映射
-- `BRAND_KEYWORDS`：品牌简称 → 商品名特征词 映射（用于交易明细内容校验）
-- `PROJECT_DIR`：产出文件根目录（默认当前工作目录）
-- `PYTHON`：含 openpyxl 的 Python 解释器绝对路径（venv），用于 `generate-daily-report.py` / `extract-products.py`
-- `DOWNLOADS_DIR`：浏览器下载目录（默认 `$HOME/Downloads`）
-
-> ⚠️ 切勿将真实账号密码提交进版本库。`config.js` 中请只保留占位符或用环境变量注入。
-
-### URL
-- 抖店后台：https://fxg.jinritemai.com/
-- 电商罗盘：https://compass.jinritemai.com/shop
-- 商品列表：compass.jinritemai.com/shop/commodity/product-list
-- 达人列表：compass.jinritemai.com/shop/talent-core-analysis（→ 合作达人 tab）
+- 依赖抖店前端 DOM（class hash 后缀、坐标），前端改版需回归调试；运行时内置重试/兜底，无结构性根治。
+- 依赖屏幕分辨率稳定（坐标点击基于视口）。
+- 无自动验证码通过能力：geetest 滑块需人工一次性拖拽。
